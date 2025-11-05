@@ -19,6 +19,8 @@ namespace Fleck
                     return Hybi13Handler.Create(request, onMessage, onClose, onBinary, onPing, onPong);
                 case "policy-file-request":
                     return FlashSocketPolicyRequestHandler.Create(request);
+                case "http-get":
+                    return HttpGetHandler.Create(request);
             }
             
             throw new WebSocketException(WebSocketStatusCodes.UnsupportedDataType);
@@ -38,6 +40,10 @@ namespace Fleck
             
             if ((request.Body != null) && request.Body.ToLower().Contains("policy-file-request"))
                 return "policy-file-request";
+
+            // Check if it's a regular HTTP request (no WebSocket upgrade)
+            if (request.Method == "GET" && !request.Headers.ContainsKey("Upgrade"))
+                return "http-get";
 
             return "75";
         }
