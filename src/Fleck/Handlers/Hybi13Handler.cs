@@ -48,6 +48,22 @@ namespace Fleck.Handlers
             return memoryStream.ToArray();
         }
         
+        /// <summary>
+        /// Hard ceiling on a single declared frame payload. The largest
+        /// legitimate frames are multi-MB webcam captures (~4.3MB measured);
+        /// 64MB leaves order-of-magnitude headroom while stopping a hostile
+        /// client from ballooning the per-connection buffer, and closes the
+        /// retired parser's 64-bit-length truncation (a declared 2^32 length
+        /// used to cast to int 0 and desync the stream).
+        /// </summary>
+        public const long MaxFramePayloadLength = 64L * 1024 * 1024;
+
+        private static bool IsControlFrame(FrameType frameType)
+        {
+            // RFC 6455 5.5: opcodes 8-15 are control frames
+            return (int)frameType >= 8;
+        }
+
         public static void ReceiveData(MessageBuffer data, ReadState readState, Action<FrameType, byte[]> processFrame)
         {
 
@@ -66,8 +82,19 @@ namespace Fleck.Handlers
                     || (frameType == FrameType.Continuation && !readState.FrameType.HasValue))
                     throw new WebSocketException(WebSocketStatusCodes.ProtocolError);
 
+                // RFC 6455 5.5: control frames may not be fragmented and carry
+                // at most 125 payload bytes (the retired parser accepted both,
+                // corrupting any in-flight fragmented message)
+                if (IsControlFrame(frameType) && (!isFinal || length > 125))
+                    throw new WebSocketException(WebSocketStatusCodes.ProtocolError);
+
+                // RFC 6455 5.4: a new data frame may not start while another
+                // message's fragments are outstanding
+                if (!IsControlFrame(frameType) && frameType != FrameType.Continuation && readState.FrameType.HasValue)
+                    throw new WebSocketException(WebSocketStatusCodes.ProtocolError);
+
                 var index = 2;
-                int payloadLength;
+                long declaredLength;
 
                 if (length == 127)
                 {
@@ -75,7 +102,7 @@ namespace Fleck.Handlers
                         return; //Not complete
                     var lengthBytes = new byte[8];
                     data.CopyTo(index, lengthBytes, 0, 8);
-                    payloadLength = lengthBytes.ToLittleEndianInt();
+                    declaredLength = lengthBytes.ToLittleEndianLong();
                     index += 8;
                 }
                 else if (length == 126)
@@ -84,13 +111,18 @@ namespace Fleck.Handlers
                         return; //Not complete
                     var lengthBytes = new byte[2];
                     data.CopyTo(index, lengthBytes, 0, 2);
-                    payloadLength = lengthBytes.ToLittleEndianInt();
+                    declaredLength = lengthBytes.ToLittleEndianLong();
                     index += 2;
                 }
                 else
                 {
-                    payloadLength = length;
+                    declaredLength = length;
                 }
+
+                if (declaredLength < 0 || declaredLength > MaxFramePayloadLength)
+                    throw new WebSocketException(WebSocketStatusCodes.MessageTooBig);
+
+                int payloadLength = (int)declaredLength;
 
                 if (data.Count < index + 4)
                     return; //Not complete
@@ -114,10 +146,20 @@ namespace Fleck.Handlers
 
                 data.Consume(index + payloadLength);
 
+                if (IsControlFrame(frameType))
+                {
+                    // control frames are processed standalone and never touch
+                    // fragmentation state - the retired parser stamped
+                    // readState.FrameType and appended the control payload to
+                    // the in-flight fragment buffer, corrupting both
+                    processFrame(frameType, payloadData);
+                    continue;
+                }
+
                 if (frameType != FrameType.Continuation)
                     readState.FrameType = frameType;
 
-                if (isFinal && readState.FrameType.HasValue)
+                if (isFinal)
                 {
                     if (readState.Data.Count == 0 && frameType != FrameType.Continuation)
                     {

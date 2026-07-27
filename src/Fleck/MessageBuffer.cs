@@ -66,6 +66,12 @@ namespace Fleck
             _tail += count;
         }
 
+        // buffers grown past this are released once drained: steady-state webcam
+        // frames (~4.3MB measured) keep their warm buffer, while a one-off jumbo
+        // frame does not pin tens of MB for the connection's lifetime
+        private const int ShrinkThreshold = 8 * 1024 * 1024;
+        private const int ShrinkTo = 64 * 1024;
+
         /// <summary>Advances past count consumed bytes; resets when drained.</summary>
         public void Consume(int count)
         {
@@ -74,6 +80,9 @@ namespace Fleck
             {
                 _head = 0;
                 _tail = 0;
+
+                if (_array.Length > ShrinkThreshold)
+                    _array = new byte[ShrinkTo];
             }
         }
 
