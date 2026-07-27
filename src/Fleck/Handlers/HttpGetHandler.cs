@@ -26,7 +26,7 @@ namespace Fleck.Handlers
             return Encoding.UTF8.GetBytes(response);
         }
 
-        public void Receive(IEnumerable<byte> data)
+        public void Receive(byte[] data, int count)
         {
             // HTTP is request-response, no additional data expected
             // Do nothing

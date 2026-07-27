@@ -83,6 +83,7 @@
     <Compile Include="WebSocketConnection.cs" />
     <Compile Include="WebSocketException.cs" />
     <Compile Include="IntExtensions.cs" />
+    <Compile Include="MessageBuffer.cs" />
     <Compile Include="FrameType.cs" />
     <Compile Include="ReadState.cs" />
     <Compile Include="Interfaces\IHandler.cs" />

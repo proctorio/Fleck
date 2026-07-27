@@ -35,7 +35,10 @@ namespace Fleck
 
     private bool _closing;
     private bool _closed;
-    private const int ReadSize = 1024 * 4;
+    // 32KB (was 4KB): multi-MB webcam frames arrived in ~1000 reads each, paying
+    // the callback + append machinery per read; 8x fewer iterations for ~28KB
+    // more steady-state memory per connection (fork, 2026-07-27)
+    private const int ReadSize = 1024 * 32;
 
     public Action OnOpen { get; set; }
 
@@ -174,11 +177,14 @@ namespace Fleck
           return;
         }
         FleckLog.Debug(r + " bytes read");
-        var readBytes = buffer.Take(r);
         if (Handler != null) {
-          Handler.Receive(readBytes);
+          // post-handshake hot path: hand the raw buffer over, no per-byte
+          // enumerator copy (fork, 2026-07-27)
+          Handler.Receive(buffer, r);
         } else {
-          data.AddRange(readBytes);
+          // pre-handshake only - one small http request per connection
+          for (var i = 0; i < r; i++)
+            data.Add(buffer[i]);
           CreateHandler(data);
         }
 

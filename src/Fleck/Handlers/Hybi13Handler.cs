@@ -48,9 +48,9 @@ namespace Fleck.Handlers
             return memoryStream.ToArray();
         }
         
-        public static void ReceiveData(List<byte> data, ReadState readState, Action<FrameType, byte[]> processFrame)
+        public static void ReceiveData(MessageBuffer data, ReadState readState, Action<FrameType, byte[]> processFrame)
         {
-            
+
             while (data.Count >= 2)
             {
                 var isFinal = (data[0] & 128) != 0;
@@ -58,67 +58,91 @@ namespace Fleck.Handlers
                 var frameType = (FrameType)(data[0] & 15);
                 var isMasked = (data[1] & 128) != 0;
                 var length = (data[1] & 127);
-                
-                
+
+
                 if (!isMasked
                     || !Enum.IsDefined(typeof(FrameType), frameType)
                     || reservedBits != 0 //Must be zero per spec 5.2
                     || (frameType == FrameType.Continuation && !readState.FrameType.HasValue))
                     throw new WebSocketException(WebSocketStatusCodes.ProtocolError);
-                
+
                 var index = 2;
                 int payloadLength;
-                
+
                 if (length == 127)
                 {
                     if (data.Count < index + 8)
                         return; //Not complete
-                    payloadLength = data.Skip(index).Take(8).ToArray().ToLittleEndianInt();
+                    var lengthBytes = new byte[8];
+                    data.CopyTo(index, lengthBytes, 0, 8);
+                    payloadLength = lengthBytes.ToLittleEndianInt();
                     index += 8;
                 }
                 else if (length == 126)
                 {
                     if (data.Count < index + 2)
                         return; //Not complete
-                    payloadLength = data.Skip(index).Take(2).ToArray().ToLittleEndianInt();
+                    var lengthBytes = new byte[2];
+                    data.CopyTo(index, lengthBytes, 0, 2);
+                    payloadLength = lengthBytes.ToLittleEndianInt();
                     index += 2;
                 }
                 else
                 {
                     payloadLength = length;
                 }
-                
-                if (data.Count < index + 4) 
-                    return; //Not complete
-               
-                var maskBytes = data.Skip(index).Take(4).ToArray();
-                
-                index += 4;
-                
-                
-                if (data.Count < index + payloadLength) 
-                    return; //Not complete
-                
-                // upstream fe039eba: unmask with a straight loop instead of a
-                // per-byte LINQ enumerator chain - this runs on every masked
-                // client frame including multi-MB webcam payloads
-                byte[] payloadData = new byte[payloadLength];
-                for (int i = 0; i < payloadLength; i++)
-                    payloadData[i] = (byte)(data[index + i] ^ maskBytes[i % 4]);
 
-                readState.Data.AddRange(payloadData);
-                data.RemoveRange(0, index + payloadLength);
-                
+                if (data.Count < index + 4)
+                    return; //Not complete
+
+                var maskBytes = new byte[4];
+                data.CopyTo(index, maskBytes, 0, 4);
+
+                index += 4;
+
+
+                if (data.Count < index + payloadLength)
+                    return; //Not complete
+
+                // block-copy the payload out, then unmask in place - the retired
+                // path re-read every byte through the buffer indexer (and before
+                // fe039eba, through a per-byte LINQ chain)
+                byte[] payloadData = new byte[payloadLength];
+                data.CopyTo(index, payloadData, 0, payloadLength);
+                for (int i = 0; i < payloadLength; i++)
+                    payloadData[i] = (byte)(payloadData[i] ^ maskBytes[i % 4]);
+
+                data.Consume(index + payloadLength);
+
                 if (frameType != FrameType.Continuation)
                     readState.FrameType = frameType;
-                
+
                 if (isFinal && readState.FrameType.HasValue)
                 {
-                    var stateData = readState.Data.ToArray();
-                    var stateFrameType = readState.FrameType;
-                    readState.Clear();
-                    
-                    processFrame(stateFrameType.Value, stateData);
+                    if (readState.Data.Count == 0 && frameType != FrameType.Continuation)
+                    {
+                        // single-frame message (the overwhelmingly common case):
+                        // hand the unmasked payload over directly instead of
+                        // paying AddRange + ToArray - two full copies of every
+                        // multi-MB webcam frame on the retired path
+                        var singleFrameType = readState.FrameType.Value;
+                        readState.Clear();
+                        processFrame(singleFrameType, payloadData);
+                    }
+                    else
+                    {
+                        readState.Data.AddRange(payloadData);
+                        var stateData = readState.Data.ToArray();
+                        var stateFrameType = readState.FrameType;
+                        readState.Clear();
+
+                        processFrame(stateFrameType.Value, stateData);
+                    }
+                }
+                else
+                {
+                    // fragmented message - accumulate across continuations
+                    readState.Data.AddRange(payloadData);
                 }
             }
         }
