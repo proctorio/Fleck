@@ -9,37 +9,32 @@ namespace Fleck
         {
             var version = GetVersion(request);
             
+            // fork note: Draft76/Hixie ("76") and the Flash socket-policy handler
+            // were removed 2026-07-27 - dead protocols (pre-2012 browsers, Flash),
+            // pure attack surface; the policy handler even served an allow-all
+            // cross-domain policy. Anything that isn't Hybi-07/08/13 or plain
+            // http now falls through to the UnsupportedDataType close below.
             switch (version)
             {
-                case "76":
-                    return Draft76Handler.Create(request, onMessage);
                 case "7":
                 case "8":
                 case "13":
                     return Hybi13Handler.Create(request, onMessage, onClose, onBinary, onPing, onPong);
-                case "policy-file-request":
-                    return FlashSocketPolicyRequestHandler.Create(request);
                 case "http-get":
                     return HttpGetHandler.Create(request);
             }
-            
+
             throw new WebSocketException(WebSocketStatusCodes.UnsupportedDataType);
         }
-        
-        public static string GetVersion(WebSocketHttpRequest request) 
+
+        public static string GetVersion(WebSocketHttpRequest request)
         {
             string version;
             if (request.Headers.TryGetValue("Sec-WebSocket-Version", out version))
                 return version;
-                
+
             if (request.Headers.TryGetValue("Sec-WebSocket-Draft", out version))
                 return version;
-            
-            if (request.Headers.ContainsKey("Sec-WebSocket-Key1"))
-                return "76";
-            
-            if ((request.Body != null) && request.Body.ToLower().Contains("policy-file-request"))
-                return "policy-file-request";
 
             // Check if it's a regular HTTP request (no WebSocket upgrade).
             // HEAD is included: it is GET-without-body and health checkers use it;

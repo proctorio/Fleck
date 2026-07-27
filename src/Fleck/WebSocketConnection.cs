@@ -201,10 +201,8 @@ namespace Fleck
       }
 
       OnError(e);
-            
-      if (e is HandshakeException) {
-        FleckLog.Debug("Error while reading", e);
-      } else if (e is WebSocketException) {
+
+      if (e is WebSocketException) {
         FleckLog.Debug("Error while reading", e);
         Close(((WebSocketException)e).StatusCode);
       } else if (e is SubProtocolNegotiationFailureException) {
