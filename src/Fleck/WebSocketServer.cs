@@ -107,7 +107,9 @@ namespace Fleck
                     try
                     {
                         ListenerSocket.Dispose();
-                        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
+                        // upstream 598e595e: honor the configured address family on
+                        // restart instead of hardcoding IPv4
+                        var socket = new Socket(_locationIP.AddressFamily, SocketType.Stream, ProtocolType.IP);
                         ListenerSocket = new SocketWrapper(socket);
                         Start(_config);
                         FleckLog.Info("Listener socket restarted");

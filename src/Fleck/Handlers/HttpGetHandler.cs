@@ -13,12 +13,16 @@ namespace Fleck.Handlers
 
         public byte[] CreateHandshake(string subProtocol = null)
         {
-            // Return a simple HTTP 204 No Content response with empty body
-            var response = "HTTP/1.1 204 No Content\r\n" +
+            // 200 (not 204): Azure LB HTTP(S) health probes mark an instance DOWN
+            // for any status other than 200, and RFC 9110 forbids Content-Length
+            // on a 204. Content-Length: 0 on a 200 is valid framing for GET and
+            // HEAD alike. The connection is closed by the server right after
+            // this is sent (see WebSocketConnection.CreateHandler).
+            var response = "HTTP/1.1 200 OK\r\n" +
                           "Content-Length: 0\r\n" +
                           "Connection: close\r\n" +
                           "\r\n";
-            
+
             return Encoding.UTF8.GetBytes(response);
         }
 

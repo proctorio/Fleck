@@ -135,6 +135,23 @@ namespace Fleck
       Handler = _handlerFactory(request);
       if (Handler == null)
         return;
+
+      // plain http (health probes, browsers hitting the endpoint): answer and
+      // actively close - rfc 9112 requires the server to initiate closure after
+      // a "Connection: close" response, and leaving the socket open would park
+      // it in a read loop that silently discards everything (Receive no-ops).
+      // the websocket lifecycle (_initialize / OnOpen) is deliberately skipped
+      // so a probe never spins up per-connection application state.
+      // ShutdownSend (TCP half-close), NOT CloseSocket: an immediate
+      // Close/Dispose races the in-flight response with a pending read armed
+      // and RSTs the bytes away; FIN-after-flush lets the peer's close drive
+      // the normal read-0 teardown.
+      if (Handler is Fleck.Handlers.HttpGetHandler)
+      {
+        SendBytes(Handler.CreateHandshake(null), Socket.ShutdownSend);
+        return;
+      }
+
       var subProtocol = _negotiateSubProtocol(request.SubProtocols);
       ConnectionInfo = WebSocketConnectionInfo.Create(request, Socket.RemoteIpAddress, Socket.RemotePort, subProtocol);
 
