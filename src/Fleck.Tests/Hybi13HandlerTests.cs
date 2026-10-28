@@ -30,6 +30,24 @@ namespace Fleck.Tests
             _handler = Hybi13Handler.Create(_request, s => _onMessage(s), () => _onClose(), b => _onBinary(b), b => _onPing(b), b => _onPong(b));
         }
 
+        private void Receive(byte[] bytes)
+        {
+            _handler.Receive(bytes, bytes.Length);
+        }
+
+        // header only: FIN/opcode, masked + 64-bit extended length, zero mask key
+        private static byte[] FrameHeader(bool isFinal, FrameType frameType, ulong declaredLength)
+        {
+            var header = new byte[14];
+            header[0] = (byte)((isFinal ? 128 : 0) + (byte)frameType);
+            header[1] = 128 + 127;
+            var lengthBytes = BitConverter.GetBytes(declaredLength);
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(lengthBytes);
+            Array.Copy(lengthBytes, 0, header, 2, 8);
+            return header;
+        }
+
         [Test]
         public void ShouldCreateAnswerGuid()
         {
@@ -89,7 +107,7 @@ namespace Fleck.Tests
             //FIN:1 Type:1 (text) LEN:5 Payload:"Hello"
             var data = new byte[]{ 129, 5, 72, 101, 108, 108, 111 };
 
-            Assert.Catch<WebSocketException>(() => _handler.Receive(data));
+            Assert.Catch<WebSocketException>(() => Receive(data));
         }
 
 
@@ -108,7 +126,7 @@ namespace Fleck.Tests
 
             string result = null;
             _onMessage = s => result = s;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.AreEqual(expected, result);
         }
@@ -129,7 +147,7 @@ namespace Fleck.Tests
 
             var hit = false;
             _onMessage = s => hit = true;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.IsFalse(hit);
         }
@@ -161,8 +179,8 @@ namespace Fleck.Tests
 
             string result = null;
             _onMessage = s => result = s;
-            _handler.Receive(firstFrame.ToBytes());
-            _handler.Receive(secondFrame.ToBytes());
+            Receive(firstFrame.ToBytes());
+            Receive(secondFrame.ToBytes());
 
             Assert.AreEqual(expected, result);
         }
@@ -179,7 +197,7 @@ namespace Fleck.Tests
                     Payload = Encoding.UTF8.GetBytes("continue")
                 };
 
-            var ex = Assert.Catch<WebSocketException>(() => _handler.Receive(frame.ToBytes()));
+            var ex = Assert.Catch<WebSocketException>(() => Receive(frame.ToBytes()));
             Assert.AreEqual(WebSocketStatusCodes.ProtocolError, ex.StatusCode);
         }
 
@@ -197,7 +215,7 @@ namespace Fleck.Tests
 
             var hit = false;
             _onClose = () => hit = true;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.IsTrue(hit);
         }
@@ -217,7 +235,7 @@ namespace Fleck.Tests
 
             var hit = false;
             _onClose = () => hit = true;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.IsTrue(hit);
         }
@@ -234,7 +252,7 @@ namespace Fleck.Tests
                     Payload = 5000.ToBigEndianBytes<ushort>()
                 };
 
-            var ex = Assert.Throws<WebSocketException>(() => _handler.Receive(frame.ToBytes()));
+            var ex = Assert.Throws<WebSocketException>(() => Receive(frame.ToBytes()));
             Assert.AreEqual(WebSocketStatusCodes.ProtocolError, ex.StatusCode);
         }
         
@@ -250,7 +268,7 @@ namespace Fleck.Tests
                     Payload = Encoding.UTF8.GetBytes(new String('x',128))
                 };
 
-            var ex = Assert.Throws<WebSocketException>(() => _handler.Receive(frame.ToBytes()));
+            var ex = Assert.Throws<WebSocketException>(() => Receive(frame.ToBytes()));
             Assert.AreEqual(WebSocketStatusCodes.ProtocolError, ex.StatusCode);
         }
         
@@ -266,7 +284,7 @@ namespace Fleck.Tests
                     Payload = 1000.ToBigEndianBytes<ushort>()
                 };
 
-            var ex = Assert.Throws<WebSocketException>(() => _handler.Receive(frame.ToBytes()));
+            var ex = Assert.Throws<WebSocketException>(() => Receive(frame.ToBytes()));
             Assert.AreEqual(WebSocketStatusCodes.ProtocolError, ex.StatusCode);
         }
         
@@ -286,7 +304,7 @@ namespace Fleck.Tests
 
             string result = null;
             _onMessage = s => result = s;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.AreEqual(expected, result);
         }
@@ -306,7 +324,7 @@ namespace Fleck.Tests
 
             string result = null;
             _onMessage = s => result = s;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.AreEqual(expected, result);
         }
@@ -323,7 +341,7 @@ namespace Fleck.Tests
                     Payload = new byte[] { 0, 7, 3, 2, byte.MaxValue}
                 };
             
-            var ex = Assert.Throws<WebSocketException>(() => _handler.Receive(frame.ToBytes()));
+            var ex = Assert.Throws<WebSocketException>(() => Receive(frame.ToBytes()));
             Assert.AreEqual(WebSocketStatusCodes.InvalidFramePayloadData, ex.StatusCode);
         }
         
@@ -342,7 +360,7 @@ namespace Fleck.Tests
 
             byte[] result = null;
             _onBinary = b => result = b;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.AreEqual(expected, result);
         }
@@ -362,7 +380,7 @@ namespace Fleck.Tests
 
             byte[] result = null;
             _onPing = b => result = b;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.AreEqual(expected, result);
         }
@@ -382,9 +400,193 @@ namespace Fleck.Tests
 
             byte[] result = null;
             _onPong = b => result = b;
-            _handler.Receive(frame.ToBytes());
+            Receive(frame.ToBytes());
 
             Assert.AreEqual(expected, result);
+        }
+
+        [Test]
+        public void ShouldOnlyReadCountBytesAndReassembleAFrameSplitAcrossReads()
+        {
+            const string expected = "Split across reads";
+            var bytes = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Text,
+                    IsFinal = true,
+                    IsMasked = true,
+                    MaskKey = 34298,
+                    Payload = Encoding.UTF8.GetBytes(expected)
+                }.ToBytes();
+
+            string result = null;
+            _onMessage = s => result = s;
+
+            // a socket read buffer is larger than the read; bytes past count are stale
+            var readBuffer = Enumerable.Repeat(byte.MaxValue, 64).ToArray();
+            Array.Copy(bytes, 0, readBuffer, 0, 3);
+            _handler.Receive(readBuffer, 3);
+            Assert.IsNull(result);
+
+            Array.Copy(bytes, 3, readBuffer, 0, bytes.Length - 3);
+            _handler.Receive(readBuffer, bytes.Length - 3);
+            Assert.AreEqual(expected, result);
+        }
+
+        [Test]
+        public void ShouldThrowMessageTooBigWhenDeclaredLengthExceedsFrameCeiling()
+        {
+            var header = FrameHeader(true, FrameType.Binary, (ulong)Hybi13Handler.MaxFramePayloadLength + 1);
+
+            var ex = Assert.Throws<WebSocketException>(() => Receive(header));
+            Assert.AreEqual(WebSocketStatusCodes.MessageTooBig, ex.StatusCode);
+        }
+
+        [Test]
+        public void ShouldThrowMessageTooBigForA64BitLengthThatUsedToTruncateToZero()
+        {
+            var header = FrameHeader(true, FrameType.Binary, 1UL << 32);
+
+            var ex = Assert.Throws<WebSocketException>(() => Receive(header));
+            Assert.AreEqual(WebSocketStatusCodes.MessageTooBig, ex.StatusCode);
+        }
+
+        [Test]
+        public void ShouldThrowMessageTooBigWhenFragmentsExceedMessageCeiling()
+        {
+            var firstFrame = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Binary,
+                    IsFinal = false,
+                    IsMasked = true,
+                    MaskKey = 34298,
+                    Payload = new byte[] { 1, 2, 3 }
+                };
+            Receive(firstFrame.ToBytes());
+
+            // each frame is within the frame ceiling; together they are not
+            var continuation = FrameHeader(false, FrameType.Continuation, (ulong)Hybi13Handler.MaxFramePayloadLength);
+
+            var ex = Assert.Throws<WebSocketException>(() => Receive(continuation));
+            Assert.AreEqual(WebSocketStatusCodes.MessageTooBig, ex.StatusCode);
+        }
+
+        [Test]
+        public void ShouldAcceptFragmentsUpToMessageCeiling()
+        {
+            var firstFrame = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Binary,
+                    IsFinal = false,
+                    IsMasked = true,
+                    MaskKey = 34298,
+                    Payload = new byte[] { 1, 2, 3 }
+                };
+            Receive(firstFrame.ToBytes());
+
+            var continuation = FrameHeader(true, FrameType.Continuation, (ulong)Hybi13Handler.MaxMessagePayloadLength - 3);
+
+            // header only: accepted, and the parser waits for the payload
+            Assert.DoesNotThrow(() => Receive(continuation));
+        }
+
+        [Test]
+        public void ShouldThrowOnFragmentedControlFrame()
+        {
+            var frame = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Ping,
+                    IsFinal = false,
+                    IsMasked = true,
+                    MaskKey = 234234,
+                    Payload = new byte[] { 1 }
+                };
+
+            var ex = Assert.Throws<WebSocketException>(() => Receive(frame.ToBytes()));
+            Assert.AreEqual(WebSocketStatusCodes.ProtocolError, ex.StatusCode);
+        }
+
+        [Test]
+        public void ShouldThrowOnControlFrameOver125Bytes()
+        {
+            var frame = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Ping,
+                    IsFinal = true,
+                    IsMasked = true,
+                    MaskKey = 234234,
+                    Payload = new byte[126]
+                };
+
+            var ex = Assert.Throws<WebSocketException>(() => Receive(frame.ToBytes()));
+            Assert.AreEqual(WebSocketStatusCodes.ProtocolError, ex.StatusCode);
+        }
+
+        [Test]
+        public void ShouldThrowOnNewDataFrameWhileAMessageIsFragmented()
+        {
+            var firstFrame = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Text,
+                    IsFinal = false,
+                    IsMasked = true,
+                    MaskKey = 342808,
+                    Payload = Encoding.UTF8.GetBytes("first")
+                };
+            var secondMessage = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Binary,
+                    IsFinal = true,
+                    IsMasked = true,
+                    MaskKey = 345808,
+                    Payload = new byte[] { 1 }
+                };
+
+            Receive(firstFrame.ToBytes());
+
+            var ex = Assert.Throws<WebSocketException>(() => Receive(secondMessage.ToBytes()));
+            Assert.AreEqual(WebSocketStatusCodes.ProtocolError, ex.StatusCode);
+        }
+
+        [Test]
+        public void ShouldProcessControlFrameBetweenFragmentsWithoutCorruptingTheMessage()
+        {
+            var firstFrame = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Text,
+                    IsFinal = false,
+                    IsMasked = true,
+                    MaskKey = 342808,
+                    Payload = Encoding.UTF8.GetBytes("Hel")
+                };
+            var ping = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Ping,
+                    IsFinal = true,
+                    IsMasked = true,
+                    MaskKey = 234234,
+                    Payload = new byte[] { 7 }
+                };
+            var lastFrame = new Hybi14DataFrame
+                {
+                    FrameType = FrameType.Continuation,
+                    IsFinal = true,
+                    IsMasked = true,
+                    MaskKey = 345808,
+                    Payload = Encoding.UTF8.GetBytes("lo")
+                };
+
+            string message = null;
+            byte[] pingPayload = null;
+            _onMessage = s => message = s;
+            _onPing = b => pingPayload = b;
+
+            Receive(firstFrame.ToBytes());
+            Receive(ping.ToBytes());
+            Assert.IsNull(message);
+            Assert.AreEqual(new byte[] { 7 }, pingPayload);
+
+            Receive(lastFrame.ToBytes());
+            Assert.AreEqual("Hello", message);
         }
 
         private const string ExampleRequest =

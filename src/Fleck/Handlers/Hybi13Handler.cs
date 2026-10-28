@@ -48,9 +48,34 @@ namespace Fleck.Handlers
             return memoryStream.ToArray();
         }
         
-        public static void ReceiveData(List<byte> data, ReadState readState, Action<FrameType, byte[]> processFrame)
+        /// <summary>
+        /// Hard ceiling on a single declared frame payload. The largest
+        /// legitimate frames are multi-MB webcam captures (~4.3MB measured);
+        /// 64MB leaves order-of-magnitude headroom while stopping a hostile
+        /// client from ballooning the per-connection buffer, and closes the
+        /// retired parser's 64-bit-length truncation (a declared 2^32 length
+        /// used to cast to int 0 and desync the stream).
+        /// </summary>
+        public const long MaxFramePayloadLength = 64L * 1024 * 1024;
+
+        /// <summary>
+        /// Hard ceiling on a whole message: the sum of all its fragments'
+        /// payloads. Without it every frame could stay under the frame ceiling
+        /// while a client streams unlimited non-final fragments into
+        /// readState.Data. Same 64MB, so splitting a message into
+        /// continuations cannot get past the frame ceiling.
+        /// </summary>
+        public const long MaxMessagePayloadLength = MaxFramePayloadLength;
+
+        private static bool IsControlFrame(FrameType frameType)
         {
-            
+            // RFC 6455 5.5: opcodes 8-15 are control frames
+            return (int)frameType >= 8;
+        }
+
+        public static void ReceiveData(MessageBuffer data, ReadState readState, Action<FrameType, byte[]> processFrame)
+        {
+
             while (data.Count >= 2)
             {
                 var isFinal = (data[0] & 128) != 0;
@@ -58,66 +83,123 @@ namespace Fleck.Handlers
                 var frameType = (FrameType)(data[0] & 15);
                 var isMasked = (data[1] & 128) != 0;
                 var length = (data[1] & 127);
-                
-                
+
+
                 if (!isMasked
                     || !Enum.IsDefined(typeof(FrameType), frameType)
                     || reservedBits != 0 //Must be zero per spec 5.2
                     || (frameType == FrameType.Continuation && !readState.FrameType.HasValue))
                     throw new WebSocketException(WebSocketStatusCodes.ProtocolError);
-                
+
+                // RFC 6455 5.5: control frames may not be fragmented and carry
+                // at most 125 payload bytes (the retired parser accepted both,
+                // corrupting any in-flight fragmented message)
+                if (IsControlFrame(frameType) && (!isFinal || length > 125))
+                    throw new WebSocketException(WebSocketStatusCodes.ProtocolError);
+
+                // RFC 6455 5.4: a new data frame may not start while another
+                // message's fragments are outstanding
+                if (!IsControlFrame(frameType) && frameType != FrameType.Continuation && readState.FrameType.HasValue)
+                    throw new WebSocketException(WebSocketStatusCodes.ProtocolError);
+
                 var index = 2;
-                int payloadLength;
-                
+                long declaredLength;
+
                 if (length == 127)
                 {
                     if (data.Count < index + 8)
                         return; //Not complete
-                    payloadLength = data.Skip(index).Take(8).ToArray().ToLittleEndianInt();
+                    var lengthBytes = new byte[8];
+                    data.CopyTo(index, lengthBytes, 0, 8);
+                    declaredLength = lengthBytes.ToLittleEndianLong();
                     index += 8;
                 }
                 else if (length == 126)
                 {
                     if (data.Count < index + 2)
                         return; //Not complete
-                    payloadLength = data.Skip(index).Take(2).ToArray().ToLittleEndianInt();
+                    var lengthBytes = new byte[2];
+                    data.CopyTo(index, lengthBytes, 0, 2);
+                    declaredLength = lengthBytes.ToLittleEndianLong();
                     index += 2;
                 }
                 else
                 {
-                    payloadLength = length;
+                    declaredLength = length;
                 }
-                
-                if (data.Count < index + 4) 
+
+                if (declaredLength < 0 || declaredLength > MaxFramePayloadLength)
+                    throw new WebSocketException(WebSocketStatusCodes.MessageTooBig);
+
+                // checked on the header, so an oversized fragment is refused
+                // before its payload is buffered. control frames never join
+                // readState.Data (and are <= 125 bytes anyway)
+                if (!IsControlFrame(frameType) && readState.Data.Count + declaredLength > MaxMessagePayloadLength)
+                    throw new WebSocketException(WebSocketStatusCodes.MessageTooBig);
+
+                int payloadLength = (int)declaredLength;
+
+                if (data.Count < index + 4)
                     return; //Not complete
-               
-                var maskBytes = data.Skip(index).Take(4).ToArray();
-                
+
+                var maskBytes = new byte[4];
+                data.CopyTo(index, maskBytes, 0, 4);
+
                 index += 4;
-                
-                
-                if (data.Count < index + payloadLength) 
+
+
+                if (data.Count < index + payloadLength)
                     return; //Not complete
-                
-                var payload = data
-                                .Skip(index)
-                                .Take(payloadLength)
-                                .Select((x, i) => (byte)(x ^ maskBytes[i % 4]));
-                 
-                 
-                readState.Data.AddRange(payload);
-                data.RemoveRange(0, index + payloadLength);
-                
+
+                // block-copy the payload out, then unmask in place - the retired
+                // path re-read every byte through the buffer indexer (and before
+                // fe039eba, through a per-byte LINQ chain)
+                byte[] payloadData = new byte[payloadLength];
+                data.CopyTo(index, payloadData, 0, payloadLength);
+                for (int i = 0; i < payloadLength; i++)
+                    payloadData[i] = (byte)(payloadData[i] ^ maskBytes[i % 4]);
+
+                data.Consume(index + payloadLength);
+
+                if (IsControlFrame(frameType))
+                {
+                    // control frames are processed standalone and never touch
+                    // fragmentation state - the retired parser stamped
+                    // readState.FrameType and appended the control payload to
+                    // the in-flight fragment buffer, corrupting both
+                    processFrame(frameType, payloadData);
+                    continue;
+                }
+
                 if (frameType != FrameType.Continuation)
                     readState.FrameType = frameType;
-                
-                if (isFinal && readState.FrameType.HasValue)
+
+                if (isFinal)
                 {
-                    var stateData = readState.Data.ToArray();
-                    var stateFrameType = readState.FrameType;
-                    readState.Clear();
-                    
-                    processFrame(stateFrameType.Value, stateData);
+                    if (readState.Data.Count == 0 && frameType != FrameType.Continuation)
+                    {
+                        // single-frame message (the overwhelmingly common case):
+                        // hand the unmasked payload over directly instead of
+                        // paying AddRange + ToArray - two full copies of every
+                        // multi-MB webcam frame on the retired path
+                        var singleFrameType = readState.FrameType.Value;
+                        readState.Clear();
+                        processFrame(singleFrameType, payloadData);
+                    }
+                    else
+                    {
+                        readState.Data.AddRange(payloadData);
+                        var stateData = readState.Data.ToArray();
+                        var stateFrameType = readState.FrameType;
+                        readState.Clear();
+
+                        processFrame(stateFrameType.Value, stateData);
+                    }
+                }
+                else
+                {
+                    // fragmented message - accumulate across continuations
+                    readState.Data.AddRange(payloadData);
                 }
             }
         }

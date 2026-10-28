@@ -8,6 +8,7 @@
     <AppDesignerFolder>Properties</AppDesignerFolder>
     <RootNamespace>Fleck</RootNamespace>
     <AssemblyName>Fleck</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <FileUpgradeFlags>
     </FileUpgradeFlags>
@@ -67,8 +68,7 @@
   <ItemGroup>
     <Compile Include="ConnectionNotAvailableException.cs" />
     <Compile Include="Handlers\ComposableHandler.cs" />
-    <Compile Include="Handlers\Draft76Handler.cs" />
-    <Compile Include="Handlers\FlashSocketPolicyRequestHandler.cs" />
+    <Compile Include="Handlers\HttpGetHandler.cs" />
     <Compile Include="Handlers\Hybi13Handler.cs" />
     <Compile Include="Interfaces\ISocket.cs" />
     <Compile Include="Interfaces\IWebSocketConnection.cs" />
@@ -84,7 +84,7 @@
     <Compile Include="WebSocketConnection.cs" />
     <Compile Include="WebSocketException.cs" />
     <Compile Include="IntExtensions.cs" />
-    <Compile Include="HandshakeException.cs" />
+    <Compile Include="MessageBuffer.cs" />
     <Compile Include="FrameType.cs" />
     <Compile Include="ReadState.cs" />
     <Compile Include="Interfaces\IHandler.cs" />

@@ -9,10 +9,8 @@ namespace Fleck
                                @"((?<field_name>[^:\r\n]+):(?([^\r\n])\s)*(?<field_value>[^\r\n]*)\r\n)+" + //headers
                                @"\r\n" + //newline
                                @"(?<body>.+)?";
-        const string FlashSocketPolicyRequestPattern = @"^[<]policy-file-request\s*[/][>]";
 
         private static readonly Regex _regex = new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled);
-        private static readonly Regex _FlashSocketPolicyRequestRegex = new Regex(FlashSocketPolicyRequestPattern, RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
         public static WebSocketHttpRequest Parse(byte[] bytes)
         {
@@ -27,21 +25,13 @@ namespace Fleck
 
             if (!match.Success)
             {
-                // No websocket request header found, check for a flash socket policy request
-                match = _FlashSocketPolicyRequestRegex.Match(body);
-                if (match.Success)
-                {
-                    // It's a flash socket policy request, so return
-                    return new WebSocketHttpRequest
-                    {
-                        Body = body,
-                        Bytes = bytes
-                    };
-                }
-                else
-                {
-                    return null;
-                }
+                // not (yet) a complete http request - null tells the read loop to
+                // keep accumulating. the flash socket-policy sniff that used to
+                // live here was removed with the Flash policy handler (fork,
+                // 2026-07-27): non-http garbage now just never parses, and the
+                // read loop closes the connection once it has buffered more
+                // than WebSocketConnection.MaxHandshakeSize bytes.
+                return null;
             }
 
             var request = new WebSocketHttpRequest

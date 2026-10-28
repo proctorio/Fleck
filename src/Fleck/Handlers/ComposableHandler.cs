@@ -8,22 +8,22 @@ namespace Fleck.Handlers
         public Func<string, byte[]> Handshake = s => new byte[0];
         public Func<string, byte[]> TextFrame = x => new byte[0];
         public Func<byte[], byte[]> BinaryFrame = x => new byte[0];
-        public Action<List<byte>> ReceiveData = delegate { };
+        public Action<MessageBuffer> ReceiveData = delegate { };
         public Func<byte[], byte[]> PingFrame = i => new byte[0];
         public Func<byte[], byte[]> PongFrame = i => new byte[0];
         public Func<int, byte[]> CloseFrame = i => new byte[0];
-        
-        private readonly List<byte> _data = new List<byte>();
+
+        private readonly MessageBuffer _data = new MessageBuffer();
 
         public byte[] CreateHandshake(string subProtocol = null)
         {
             return Handshake(subProtocol);
         }
 
-        public void Receive(IEnumerable<byte> data)
+        public void Receive(byte[] data, int count)
         {
-            _data.AddRange(data);
-            
+            _data.Append(data, count);
+
             ReceiveData(_data);
         }
         

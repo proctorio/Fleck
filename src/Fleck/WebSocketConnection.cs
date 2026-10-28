@@ -35,7 +35,17 @@ namespace Fleck
 
     private bool _closing;
     private bool _closed;
-    private const int ReadSize = 1024 * 4;
+    // 32KB (was 4KB): multi-MB webcam frames arrived in ~1000 reads each, paying
+    // the callback + append machinery per read; 8x fewer iterations for ~28KB
+    // more steady-state memory per connection (fork, 2026-07-27)
+    private const int ReadSize = 1024 * 32;
+
+    // ceiling on the bytes buffered before the handshake completes. a
+    // websocket upgrade or probe request is a few hundred bytes to a few KB;
+    // without a ceiling a client that never finishes its request could keep
+    // streaming into the buffer (up to ReadSize per read) until it hangs up.
+    // exceeding it closes the connection (fork, 2026-10-13)
+    public const int MaxHandshakeSize = 1024 * 16;
 
     public Action OnOpen { get; set; }
 
@@ -98,7 +108,10 @@ namespace Fleck
 
     public void StartReceiving()
     {
-      var data = new List<byte>(ReadSize);
+      // no ReadSize preallocation: the request is usually well under 1KB,
+      // the list is capped at MaxHandshakeSize, and it lives as long as the
+      // connection
+      var data = new List<byte>();
       var buffer = new byte[ReadSize];
       Read(data, buffer);
     }
@@ -135,6 +148,23 @@ namespace Fleck
       Handler = _handlerFactory(request);
       if (Handler == null)
         return;
+
+      // plain http (health probes, browsers hitting the endpoint): answer and
+      // actively close - rfc 9112 requires the server to initiate closure after
+      // a "Connection: close" response, and leaving the socket open would park
+      // it in a read loop that silently discards everything (Receive no-ops).
+      // the websocket lifecycle (_initialize / OnOpen) is deliberately skipped
+      // so a probe never spins up per-connection application state.
+      // ShutdownSend (TCP half-close), NOT CloseSocket: an immediate
+      // Close/Dispose races the in-flight response with a pending read armed
+      // and RSTs the bytes away; FIN-after-flush lets the peer's close drive
+      // the normal read-0 teardown.
+      if (Handler is Fleck.Handlers.HttpGetHandler)
+      {
+        SendBytes(Handler.CreateHandshake(null), Socket.ShutdownSend);
+        return;
+      }
+
       var subProtocol = _negotiateSubProtocol(request.SubProtocols);
       ConnectionInfo = WebSocketConnectionInfo.Create(request, Socket.RemoteIpAddress, Socket.RemotePort, subProtocol);
 
@@ -157,11 +187,19 @@ namespace Fleck
           return;
         }
         FleckLog.Debug(r + " bytes read");
-        var readBytes = buffer.Take(r);
         if (Handler != null) {
-          Handler.Receive(readBytes);
+          // post-handshake hot path: hand the raw buffer over, no per-byte
+          // enumerator copy (fork, 2026-07-27)
+          Handler.Receive(buffer, r);
         } else {
-          data.AddRange(readBytes);
+          // pre-handshake only - one small http request per connection
+          if (data.Count + r > MaxHandshakeSize) {
+            FleckLog.Debug("Handshake exceeded " + MaxHandshakeSize + " bytes. Closing.");
+            Close(WebSocketStatusCodes.MessageTooBig);
+            return;
+          }
+          for (var i = 0; i < r; i++)
+            data.Add(buffer[i]);
           CreateHandler(data);
         }
 
@@ -184,10 +222,8 @@ namespace Fleck
       }
 
       OnError(e);
-            
-      if (e is HandshakeException) {
-        FleckLog.Debug("Error while reading", e);
-      } else if (e is WebSocketException) {
+
+      if (e is WebSocketException) {
         FleckLog.Debug("Error while reading", e);
         Close(((WebSocketException)e).StatusCode);
       } else if (e is SubProtocolNegotiationFailureException) {

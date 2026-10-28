@@ -36,6 +36,25 @@ namespace Fleck
         }
 
 
+        // upstream 291e9189/d9fe06c9: default tcp keepalive on most systems is
+        // ~7200s; a dead peer holds its socket for hours. 60s probe / 10s retry
+        // reclaims half-open connections quickly. windows-only API (IOControl
+        // KeepAliveValues) - this fork builds solely for .NET Framework/Windows.
+        public const UInt32 KeepAliveInterval = 60000;
+        public const UInt32 RetryInterval = 10000;
+
+        public static void SetKeepAlive(Socket socket, UInt32 keepAliveInterval, UInt32 retryInterval)
+        {
+            int size = sizeof(UInt32);
+            UInt32 on = 1;
+
+            byte[] inArray = new byte[size * 3];
+            Array.Copy(BitConverter.GetBytes(on), 0, inArray, 0, size);
+            Array.Copy(BitConverter.GetBytes(keepAliveInterval), 0, inArray, size, size);
+            Array.Copy(BitConverter.GetBytes(retryInterval), 0, inArray, size * 2, size);
+            socket.IOControl(IOControlCode.KeepAliveValues, inArray, null);
+        }
+
         public SocketWrapper(Socket socket)
         {
             _tokenSource = new CancellationTokenSource();
@@ -43,6 +62,8 @@ namespace Fleck
             _socket = socket;
             if (_socket.Connected)
                 _stream = new NetworkStream(_socket);
+
+            SetKeepAlive(socket, KeepAliveInterval, RetryInterval);
         }
 
         public Task Authenticate(X509Certificate2 certificate, SslProtocols enabledSslProtocols, Action callback, Action<Exception> error)
@@ -133,6 +154,20 @@ namespace Fleck
             _tokenSource.Cancel();
             if (_stream != null) _stream.Close();
             if (_socket != null) _socket.Close();
+        }
+
+        public void ShutdownSend()
+        {
+            // graceful half-close: queued data flushes, FIN follows, receive side
+            // stays open; the peer's own close then drives the read-0 teardown.
+            // never throws - a peer that already reset us makes Shutdown throw,
+            // and at that point there is nothing left to flush anyway
+            try
+            {
+                if (_socket != null) _socket.Shutdown(SocketShutdown.Send);
+            }
+            catch (SocketException) { }
+            catch (ObjectDisposedException) { }
         }
 
         public int EndSend(IAsyncResult asyncResult)

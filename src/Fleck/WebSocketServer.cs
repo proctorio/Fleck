@@ -26,6 +26,15 @@ namespace Fleck
             Location = location;
             _locationIP = ParseIPAddress(uri);
             _scheme = uri.Scheme;
+            ListenerSocket = new SocketWrapper(CreateListenerSocket());
+            SupportedSubProtocols = new string[0];
+        }
+
+        // used by the constructor and the restart path alike, so a restarted
+        // listener keeps the dual-stack (IPv6Only=false) setting and still
+        // accepts IPv4 clients on an IPv6 address
+        private Socket CreateListenerSocket()
+        {
             var socket = new Socket(_locationIP.AddressFamily, SocketType.Stream, ProtocolType.IP);
             if(!MonoHelper.IsRunningOnMono()){
                   #if __MonoCS__
@@ -33,8 +42,7 @@ namespace Fleck
                     socket.SetSocketOption(SocketOptionLevel.IPv6, SocketOptionName.IPv6Only, false);
                   #endif
             }
-            ListenerSocket = new SocketWrapper(socket);
-            SupportedSubProtocols = new string[0];
+            return socket;
         }
 
         public ISocket ListenerSocket { get; set; }
@@ -107,8 +115,9 @@ namespace Fleck
                     try
                     {
                         ListenerSocket.Dispose();
-                        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.IP);
-                        ListenerSocket = new SocketWrapper(socket);
+                        // upstream 598e595e: honor the configured address family on
+                        // restart instead of hardcoding IPv4
+                        ListenerSocket = new SocketWrapper(CreateListenerSocket());
                         Start(_config);
                         FleckLog.Info("Listener socket restarted");
                     }
